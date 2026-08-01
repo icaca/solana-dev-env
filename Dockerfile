@@ -1,7 +1,7 @@
-FROM rust:1.86
+FROM rust:1.90
 
-ARG SOLANA_VERSION=v2.1.20
-ARG ANCHOR_VERSION=v0.31.1
+ARG SOLANA_VERSION=v2.2.12
+ARG ANCHOR_VERSION=v0.32.1
 
 RUN apt-get update -y 
 RUN apt-get upgrade -y 
@@ -24,4 +24,4 @@ RUN chmod +x /bin/shell-exec
 EXPOSE 8080
 EXPOSE 9000
 
-WORKDIR workspace/
+WORKDIR /workspace
