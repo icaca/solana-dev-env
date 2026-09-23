@@ -36,13 +36,74 @@ RUN apt-get update -y && \
     apt-get purge -y --auto-remove pkg-config libssl-dev && \
     rm -rf /var/lib/apt/lists/* /root/.cargo/registry
 
-COPY verify-protobuf.sh /usr/local/bin/verify-protobuf
-RUN chmod +x /usr/local/bin/verify-protobuf && verify-protobuf
+# Preload the toolchain and verify protobuf imports and SBPF v3 during the build.
+RUN <<'CHECKS'
+set -eu
 
-COPY verify-sbpf-v3.sh /usr/local/bin/verify-sbpf-v3
-RUN chmod +x /usr/local/bin/verify-sbpf-v3
-# Pre-download the pinned platform tools and verify a real v3 syscall program.
-RUN verify-sbpf-v3
+protoc --version
+test -r /usr/include/google/protobuf/timestamp.proto
+proto_dir=$(mktemp -d /tmp/protobuf-smoke.XXXXXX)
+cat > "$proto_dir/smoke.proto" <<'PROTO'
+syntax = "proto3";
+import "google/protobuf/timestamp.proto";
+message Smoke {
+  google.protobuf.Timestamp timestamp = 1;
+}
+PROTO
+# Match build.rs: only the project include directory is passed explicitly.
+protoc --proto_path="$proto_dir" --include_imports \
+    --descriptor_set_out="$proto_dir/smoke.pb" "$proto_dir/smoke.proto"
+test -s "$proto_dir/smoke.pb"
+echo "Protobuf compiler and standard Timestamp import check passed"
+set -eu
+
+test "$(command -v cargo-build-sbf)" = /root/.cargo/bin/cargo-build-sbf
+solana --version
+rustc --version
+cargo build-sbf --version
+
+smoke_dir=$(mktemp -d /tmp/sbpf-v3-smoke.XXXXXX)
+mkdir "$smoke_dir/src"
+cat > "$smoke_dir/Cargo.toml" <<'TOML'
+[package]
+name = "sbpf-v3-smoke"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+solana-define-syscall = "=2.3.0"
+
+[profile.release]
+panic = "abort"
+TOML
+cat > "$smoke_dir/src/lib.rs" <<'RUST'
+#![no_std]
+
+#[no_mangle]
+pub extern "C" fn entrypoint(_input: *mut u8) -> u64 {
+    let message = b"SBPF v3 smoke";
+    unsafe {
+        solana_define_syscall::definitions::sol_log_(message.as_ptr(), message.len() as u64);
+    }
+    0
+}
+
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    loop {}
+}
+RUST
+
+cargo build-sbf --manifest-path "$smoke_dir/Cargo.toml" \
+    --tools-version "${PLATFORM_TOOLS_VERSION:?}" --arch v3
+program="$smoke_dir/target/deploy/sbpf_v3_smoke.so"
+readelf --file-header "$program"
+readelf --file-header "$program" | awk '/Flags:/ { if ($2 == "0x3") v3 = 1 } END { exit !v3 }'
+echo "SBPF v3 syscall compilation and ELF check passed: $program"
+CHECKS
 
 COPY shell-exec.sh /bin/shell-exec
 RUN chmod +x /bin/shell-exec
